@@ -1,0 +1,297 @@
+diff --git a/src/Gml.Launcher/Core/Extensions/ServiceLocator.cs b/src/Gml.Launcher/Core/Extensions/ServiceLocator.cs
+index 94a2e19..dd755f6 100644
+--- a/src/Gml.Launcher/Core/Extensions/ServiceLocator.cs
++++ b/src/Gml.Launcher/Core/Extensions/ServiceLocator.cs
+@@ -90,7 +90,9 @@ public static class ServiceLocator
+     private static GmlClientManager RegisterGmlManager(SystemService systemService, string installationDirectory,
+         string[] arguments)
+     {
+-        var gateWay = GmlClientManager.CheckApiStatus(ResourceKeysDictionary.Host, ResourceKeysDictionary.SecondaryHost);
++        // Use the user's selected backend. Do not run CheckApiStatus with a fallback list here,
++        // because it could silently switch to a different server than the one selected in the UI.
++        var gateWay = BackendSelectionService.GetSelected().Url;
+ 
+         var manager = new GmlClientManager(
+             installationDirectory,
+diff --git a/src/Gml.Launcher/Core/Services/BackendSelectionService.cs b/src/Gml.Launcher/Core/Services/BackendSelectionService.cs
+new file mode 100644
+index 0000000..15cbe1f
+--- /dev/null
++++ b/src/Gml.Launcher/Core/Services/BackendSelectionService.cs
+@@ -0,0 +1,77 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Text.Json;
++using Gml.Launcher.Assets;
++
++namespace Gml.Launcher.Core.Services;
++
++public sealed record BackendEndpoint(string Id, string Name, string Url);
++
++/// <summary>Persists the selected backend independently of the active GmlClientManager.
++/// A restart is required because GmlClientManager creates its HTTP and SignalR clients in its constructor.
++/// </summary>
++public static class BackendSelectionService
++{
++    public static IReadOnlyList<BackendEndpoint> Endpoints { get; } = new[]
++    {
++        new BackendEndpoint("RU1", "RU1", "https://gmlfr.vestalis.xyz/"),
++        new BackendEndpoint("RU2", "RU2", "https://gmlfrr.vestalis.xyz/"),
++        new BackendEndpoint("PO", "PO", "https://201-58-180-2.sslip.io/"),
++        new BackendEndpoint("MSK1", "MSK1", "https://msk1.gmlfr.vestalis.xyz/")
++    };
++
++    private static string ConfigPath
++    {
++        get
++        {
++            var root = OperatingSystem.IsWindows()
++                ? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)
++                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
++
++            return Path.Combine(root, ResourceKeysDictionary.FolderName, "backend-selection.json");
++        }
++    }
++
++    public static BackendEndpoint GetSelected()
++    {
++        try
++        {
++            if (File.Exists(ConfigPath))
++            {
++                var config = JsonSerializer.Deserialize<SelectionConfig>(File.ReadAllText(ConfigPath));
++                var selected = Endpoints.FirstOrDefault(x =>
++                    string.Equals(x.Id, config?.BackendId, StringComparison.OrdinalIgnoreCase));
++
++                if (selected is not null)
++                    return selected;
++            }
++        }
++        catch (IOException) { }
++        catch (UnauthorizedAccessException) { }
++        catch (JsonException) { }
++
++        return Endpoints[0];
++    }
++
++    public static void Save(BackendEndpoint endpoint)
++    {
++        ArgumentNullException.ThrowIfNull(endpoint);
++
++        // Only known endpoints are accepted; don't persist arbitrary URLs.
++        var knownEndpoint = Endpoints.FirstOrDefault(x =>
++            string.Equals(x.Id, endpoint.Id, StringComparison.OrdinalIgnoreCase));
++
++        if (knownEndpoint is null)
++            throw new ArgumentException("Unknown backend selection.", nameof(endpoint));
++
++        var directory = Path.GetDirectoryName(ConfigPath)
++            ?? throw new InvalidOperationException("Cannot determine backend config directory.");
++
++        Directory.CreateDirectory(directory);
++        File.WriteAllText(ConfigPath, JsonSerializer.Serialize(new SelectionConfig(knownEndpoint.Id)));
++    }
++
++    private sealed record SelectionConfig(string BackendId);
++}
+diff --git a/src/Gml.Launcher/ViewModels/Pages/LoginPageViewModel.cs b/src/Gml.Launcher/ViewModels/Pages/LoginPageViewModel.cs
+index 24bdfb6..5c46946 100644
+--- a/src/Gml.Launcher/ViewModels/Pages/LoginPageViewModel.cs
++++ b/src/Gml.Launcher/ViewModels/Pages/LoginPageViewModel.cs
+@@ -13,6 +13,7 @@ using Gml.Client.Models;
+ using Gml.Launcher.Assets;
+ using Gml.Launcher.Core.Exceptions;
+ using Gml.Launcher.Core.Services;
++using Gml.Launcher.ViewModels;
+ using Gml.Launcher.ViewModels.Base;
+ using ReactiveUI;
+ using ReactiveUI.Fody.Helpers;
+@@ -29,6 +30,7 @@ public class LoginPageViewModel : PageViewModelBase
+     private readonly IBackendChecker _backendChecker;
+     private readonly IStorageService _storageService;
+     private readonly ISystemService _systemService;
++    private readonly string _activeBackendId;
+     private ObservableCollection<string> _errorList = [];
+     private bool _isProcessing;
+ 
+@@ -59,6 +61,11 @@ public class LoginPageViewModel : PageViewModelBase
+                           ?? Locator.Current.GetService<IBackendChecker>()
+                           ?? throw new ServiceNotFoundException(typeof(IBackendChecker));
+ 
++        BackendOptions = new ObservableCollection<BackendEndpoint>(BackendSelectionService.Endpoints);
++        var activeBackend = BackendSelectionService.GetSelected();
++        _activeBackendId = activeBackend.Id;
++        SelectedBackend = activeBackend;
++        ApplyBackendCommand = ReactiveCommand.CreateFromTask(ApplySelectedBackend);
+ 
+         _screen.OnClosed.Subscribe(DisposeConnections);
+ 
+@@ -73,6 +80,22 @@ public class LoginPageViewModel : PageViewModelBase
+     [Reactive] public string TwoFactorCode { get; set; }
+     [Reactive] public bool Is2FaVisible { get; set; }
+ 
++    public ObservableCollection<BackendEndpoint> BackendOptions { get; }
++    [Reactive] public BackendEndpoint? SelectedBackend { get; set; }
++    public ICommand ApplyBackendCommand { get; private set; }
++
++    private async Task ApplySelectedBackend()
++    {
++        if (SelectedBackend is null ||
++            string.Equals(SelectedBackend.Id, _activeBackendId, StringComparison.OrdinalIgnoreCase))
++            return;
++
++        // Tokens are usually tied to one backend; force a fresh login after switching.
++        await _storageService.SetAsync<AuthLauncherUser>(StorageConstants.User, null);
++        BackendSelectionService.Save(SelectedBackend);
++        MainWindowViewModel.RestartApp();
++    }
++
+     public bool IsProcessing
+     {
+         get => _isProcessing;
+diff --git a/src/Gml.Launcher/ViewModels/Pages/OverviewPageViewModel.cs b/src/Gml.Launcher/ViewModels/Pages/OverviewPageViewModel.cs
+index f626cfa..9ba601e 100644
+--- a/src/Gml.Launcher/ViewModels/Pages/OverviewPageViewModel.cs
++++ b/src/Gml.Launcher/ViewModels/Pages/OverviewPageViewModel.cs
+@@ -12,6 +12,7 @@ using Gml.Launcher.Core;
+ using Gml.Launcher.Core.Exceptions;
+ using Gml.Launcher.Core.Services;
+ using Gml.Launcher.Models;
++using Gml.Launcher.ViewModels;
+ using Gml.Launcher.ViewModels.Base;
+ using Gml.Launcher.ViewModels.Components;
+ using GmlCore.Interfaces.Enums;
+@@ -56,6 +57,7 @@ public class OverviewPageViewModel : PageViewModelBase
+     private readonly ISystemService _systemService;
+     private readonly IBackendChecker _backendChecker;
+     private readonly ISettingsService _settingsService;
++    private readonly string _activeBackendId;
+     private readonly IDisposable? _speedSubscription;
+ 
+     internal OverviewPageViewModel(IScreen screen,
+@@ -72,6 +74,12 @@ public class OverviewPageViewModel : PageViewModelBase
+         User = user;
+         _onClosed = onClosed;
+ 
++        BackendOptions = new ObservableCollection<BackendEndpoint>(BackendSelectionService.Endpoints);
++        var activeBackend = BackendSelectionService.GetSelected();
++        _activeBackendId = activeBackend.Id;
++        SelectedBackend = activeBackend;
++        ApplyBackendCommand = ReactiveCommand.CreateFromTask(ApplySelectedBackend);
++
+         _logHandler = logHandler
+                       ?? Locator.Current.GetService<LogHandler>()
+                       ?? throw new ServiceNotFoundException(typeof(LogHandler));
+@@ -164,6 +172,22 @@ public class OverviewPageViewModel : PageViewModelBase
+     public ILauncherUser User { get; }
+     public bool BackendIsActive { get; }
+ 
++    public ObservableCollection<BackendEndpoint> BackendOptions { get; }
++    [Reactive] public BackendEndpoint? SelectedBackend { get; set; }
++    public ICommand ApplyBackendCommand { get; private set; }
++
++    private async Task ApplySelectedBackend()
++    {
++        if (SelectedBackend is null ||
++            string.Equals(SelectedBackend.Id, _activeBackendId, StringComparison.OrdinalIgnoreCase))
++            return;
++
++        // Tokens are usually tied to one backend; force a fresh login after switching.
++        await _storageService.SetAsync<AuthLauncherUser>(StorageConstants.User, null);
++        BackendSelectionService.Save(SelectedBackend);
++        MainWindowViewModel.RestartApp();
++    }
++
+     [Reactive] public int? LoadingPercentage { get; set; }
+     [Reactive] public int? MaxCount { get; set; }
+     [Reactive] public int? LoadedCount { get; set; }
+diff --git a/src/Gml.Launcher/Views/Pages/LoginPageView.axaml b/src/Gml.Launcher/Views/Pages/LoginPageView.axaml
+index 57d788c..98069c8 100644
+--- a/src/Gml.Launcher/Views/Pages/LoginPageView.axaml
++++ b/src/Gml.Launcher/Views/Pages/LoginPageView.axaml
+@@ -5,6 +5,7 @@
+              xmlns:vm="clr-namespace:Gml.Launcher.ViewModels.Pages"
+              xmlns:lang="clr-namespace:Gml.Launcher.Assets.Resources"
+              xmlns:components="clr-namespace:Gml.Launcher.Views.Components"
++             xmlns:services="clr-namespace:Gml.Launcher.Core.Services"
+              xmlns:converters="clr-namespace:Gml.Launcher.Core.Converters"
+              mc:Ignorable="d"
+              d:DesignWidth="800"
+@@ -31,6 +32,33 @@
+ 
+             <Border Classes="Separator" />
+ 
++            <StackPanel Spacing="6">
++                <TextBlock Text="Backend" Classes="FormText" />
++                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
++                    <ComboBox Grid.Column="0"
++                              ItemsSource="{Binding BackendOptions}"
++                              SelectedItem="{Binding SelectedBackend}"
++                              HorizontalAlignment="Stretch">
++                        <ComboBox.ItemTemplate>
++                            <DataTemplate x:DataType="services:BackendEndpoint">
++                                <TextBlock Text="{Binding Name}" />
++                            </DataTemplate>
++                        </ComboBox.ItemTemplate>
++                    </ComboBox>
++                    <Button Grid.Column="1"
++                            Content="Применить и перезапустить"
++                            Command="{Binding ApplyBackendCommand}" />
++                </Grid>
++                <TextBlock Text="{Binding SelectedBackend.Url}"
++                           Classes="FormText"
++                           FontSize="10"
++                           TextWrapping="Wrap" />
++                <TextBlock Text="После смены backend лаунчер перезапустится."
++                           Classes="FormText"
++                           FontSize="10"
++                           TextWrapping="Wrap" />
++            </StackPanel>
++
+             <StackPanel Classes="MarginBottom">
+                 <TextBlock Text="{x:Static lang:Resources.Login}"
+                            Classes="FormText" />
+diff --git a/src/Gml.Launcher/Views/Pages/OverviewPageView.axaml b/src/Gml.Launcher/Views/Pages/OverviewPageView.axaml
+index e05786d..7bd7570 100644
+--- a/src/Gml.Launcher/Views/Pages/OverviewPageView.axaml
++++ b/src/Gml.Launcher/Views/Pages/OverviewPageView.axaml
+@@ -1,10 +1,11 @@
+-﻿<UserControl xmlns="https://github.com/avaloniaui"
++<UserControl xmlns="https://github.com/avaloniaui"
+              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+              xmlns:vm="clr-namespace:Gml.Launcher.ViewModels.Pages"
+              xmlns:lang="clr-namespace:Gml.Launcher.Assets.Resources"
+              xmlns:components="clr-namespace:Gml.Launcher.Views.Components"
++             xmlns:services="clr-namespace:Gml.Launcher.Core.Services"
+              xmlns:converters="clr-namespace:Gml.Launcher.Core.Converters"
+              xmlns:news="clr-namespace:Gml.Dto.News;assembly=Gml.Dto"
+              mc:Ignorable="d"
+@@ -101,6 +102,24 @@
+                                           Classes="TextIcon Additional"
+                                           Text="{x:Static lang:Resources.ModsList}" />
+ 
++                    <StackPanel Grid.Column="1"
++                                Orientation="Horizontal"
++                                HorizontalAlignment="Center"
++                                VerticalAlignment="Center"
++                                Spacing="8">
++                        <ComboBox Width="90"
++                                  ItemsSource="{Binding BackendOptions}"
++                                  SelectedItem="{Binding SelectedBackend}">
++                            <ComboBox.ItemTemplate>
++                                <DataTemplate x:DataType="services:BackendEndpoint">
++                                    <TextBlock Text="{Binding Name}" />
++                                </DataTemplate>
++                            </ComboBox.ItemTemplate>
++                        </ComboBox>
++                        <Button Content="Применить и перезапустить"
++                                Command="{Binding ApplyBackendCommand}" />
++                    </StackPanel>
++
+                     <StackPanel Grid.Column="2"
+                                 Orientation="Horizontal"
+                                 Spacing="10">

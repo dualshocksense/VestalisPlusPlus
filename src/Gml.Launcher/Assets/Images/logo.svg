@@ -1,0 +1,30 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 20010904//EN" "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
+<svg version="1.0" xmlns="http://www.w3.org/2000/svg"
+ width="96.000000pt" height="96.000000pt" viewBox="0 0 96.000000 96.000000"
+ preserveAspectRatio="xMidYMid meet">
+
+  <defs>
+    <!-- Объявляем линейный градиент. Углы x и y задают направление по диагонали -->
+    <linearGradient id="purplePinkGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#140049" />
+      <stop offset="14.3%" stop-color="#5007b3" />
+      <stop offset="28.6%" stop-color="#6f19da" />
+      <stop offset="42.9%" stop-color="#a518c7" />
+      <stop offset="57.1%" stop-color="#b914ba" />
+      <stop offset="71.4%" stop-color="#ff0992" />
+      <stop offset="85.7%" stop-color="#ff067c" />
+      <stop offset="100%" stop-color="#ff4f65" />
+    </linearGradient>
+  </defs>
+
+  <!-- Заменили fill="#FFFFFFFF" на ссылку к нашему градиенту url(#purplePinkGradient) -->
+  <g transform="translate(0.000000,96.000000) scale(0.100000,-0.100000)" fill="url(#purplePinkGradient)" stroke="none">
+    <path d="M153 950 c-69 -16 -124 -74 -143 -150 -8 -31 -10 -145 -8 -350 3
+    -340 3 -340 75 -399 58 -48 104 -53 438 -49 334 3 335 4 394 75 48 58 53 104
+    49 438 -3 261 -5 304 -20 332 -25 45 -83 89 -134 102 -49 13 -600 14 -651 1z
+    m354 -161 c70 -26 226 -124 244 -153 28 -45 28 -266 0 -311 -18 -31 -207 -149
+    -257 -161 -28 -7 -258 116 -279 150 -19 30 -29 261 -12 306 13 36 77 82 211
+    150 69 35 58 33 93 19z"/>
+  </g>
+</svg>
